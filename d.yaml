@@ -1,0 +1,257 @@
+Resources:
+  vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.25.0.0/16
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: true
+      Tags:
+        - Key: stack
+          Value: lks-vpc
+
+  Public1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: 172.25.0.0/24
+      AvailabilityZone: "us-east-1a"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: lks-subnet-public-a
+
+  Public2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: 172.25.1.0/24
+      AvailabilityZone: "us-east-1b"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: lks-subnet-public-b
+
+  Private1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: 172.25.2.0/24
+      AvailabilityZone: "us-east-1a"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: lks-subnet-private-a
+
+  Private2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: 172.25.3.0/24
+      AvailabilityZone: "us-east-1b"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: lks-subnet-private-b
+
+  igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: lks-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref vpc
+      InternetGatewayId: !Ref igw
+
+  natgw:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref Public1
+      Tags:
+        - Key: stack
+          Value: production
+
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  RouteTablePublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: lks-rt-public
+
+  RoueTablePrivate:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: lks-rt-private
+
+  Routeigw:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref igw
+
+  Routenatgw:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RoueTablePrivate
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref natgw
+
+  SubnetAttach1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Public1
+      RouteTableId: !Ref RouteTablePublic
+
+  SubnetAttach2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Public2
+      RouteTableId: !Ref RouteTablePublic
+
+  SubnetAttach3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Private1
+      RouteTableId: !Ref RoueTablePrivate
+
+  SubnetAttach4:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Private2
+      RouteTableId: !Ref RoueTablePrivate
+
+  sgALB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to client host
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      GroupName: lks-sg-lb
+      Tags:
+        - Key: Name
+          Value: lks-sg-lb
+
+  sgAPP:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow port 3000
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+      GroupName: lks-sg-app
+      Tags:
+        - Key: Name
+          Value: lks-sg-app
+
+  TG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      IpAddressType: ipv4
+      Name: TG-Frontend
+      Port: 3000
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref vpc
+      Tags:
+        - Key: Name
+          Value: TG-Frontend
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Name: lks-lb
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref sgALB
+      Subnets:
+        - !Ref Public1
+        - !Ref Public2
+      Type: application
+      Tags:
+        - Key: Name
+          Value: lks-lb
+
+  Listener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TG
+      LoadBalancerArn: !Ref ALB
+      Port: '80'
+      Protocol: HTTP
+
+  templateapp:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: lks-template-frontend
+      LaunchTemplateData:
+        ImageId: ami-0ebfd941bbafe70c6
+        SecurityGroupIds:
+          - !Ref sgAPP
+        UserData:
+          Fn::Base64: 
+            !Sub |
+              #!/bin/bash
+              curl -fsSL https://rpm.nodesource.com/setup_21.x | sudo bash -
+              yum install -y nodejs git
+              mkdir /home/ec2-user/dashboard_teman
+              git clone https://github.com/SonyVansha/dashboard_teman.git /home/ec2-user/dashboard_teman
+              touch /home/ec2-user/dashboard_teman/.env
+              printf "API_URL=https://18wza9ugcd.execute-api.us-east-1.amazonaws.com/prod" >> /home/ec2-user/dashboard_teman/.env
+              npm install --prefix /home/ec2-user/dashboard_teman
+              npm run start-prod --prefix /home/ec2-user/dashboard_teman
+        InstanceType: t2.micro
+      VersionDescription: This Template frontend
+
+  ASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref templateapp
+        Version: !GetAtt templateapp.LatestVersionNumber
+      MaxSize: "4"
+      MinSize: "2"
+      VPCZoneIdentifier:
+        - !Ref Private1
+        - !Ref Private2
+      TargetGroupARNs:
+        - !Ref TG
+      Tags:
+        - Key: Name
+          PropagateAtLaunch: true
+          Value: lks-frontend
+
+  ScalingPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref ASG
+      PolicyType: PredictiveScaling
+      PredictiveScalingConfiguration:
+        MetricSpecifications:
+          - TargetValue: "70"
+            PredefinedMetricPairSpecification:
+              PredefinedMetricType: ASGCPUUtilization
+        Mode: ForecastOnly
